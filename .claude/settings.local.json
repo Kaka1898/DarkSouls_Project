@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vite build:*)",
+      "Bash(npx vite:*)",
+      "Bash(ping:*)",
+      "Bash(start chrome:*)",
+      "Bash(npx playwright install chromium)",
+      "Bash(node:*)",
+      "Bash(npm run dev:*)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && npm install nipplejs 2>&1)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && npm run build 2>&1)",
+      "Bash(tail:*)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && git stash pop 2>&1)",
+      "Bash(pkill:*)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && node --input-type=module --experimental-vm-modules 2>&1 << 'EOF'\nimport { readFileSync } from 'fs';\nconst src = readFileSync\\('./src/player.js', 'utf8'\\);\n// We just want to check for duplicate const keys declaration issues\nconst matches = [...src.matchAll\\(/const keys = /g\\)];\nconsole.log\\('const keys 宣言数:', matches.length\\);\nEOF)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && node --input-type=module 2>&1 <<'EOF'\n// ESMとして解析できるか確認（importはスキップして構文のみチェック）\nconst src = require\\('fs'\\).readFileSync\\('./src/player.js', 'utf8'\\);\nconst vm = require\\('vm'\\);\ntry {\n  new vm.Script\\(src\\);\n  console.log\\('OK'\\);\n} catch \\(e\\) {\n  console.error\\('SYNTAX ERROR:', e.message\\);\n}\nEOF)",
+      "Bash(cd:*)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && git push -u origin feature/mobile-support 2>&1)",
+      "Bash(cd \"C:/Users/toma7/OneDrive/Desktop/my-3d-game\" && git push origin feature/mobile-support 2>&1)"
+    ]
+  }
+}
