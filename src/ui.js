@@ -699,3 +699,169 @@ if (previewWrap) {
   });
   window.addEventListener('mouseup', () => { previewDragging = false; });
 }
+
+// ============================================================
+//  モバイル入力ベクトル（player.js / main.js から参照）
+//  スティックが離れているときは active = false、stickX/Z = 0
+// ============================================================
+export const mobileInput = {
+  joyX:  0, // スティック方向 X（左=-1, 右=+1）
+  joyY:  0, // スティック方向 Y（下=-1, 上=+1 = 前進）
+  force: 0, // 押し込み強度 0-1（歩き↔走り判定に使用）
+  active: false,
+};
+
+// ============================================================
+//  モバイル操作UI — initMobileControls(callbacks)
+//  タッチデバイス専用。touchstart で Attack / Roll / Estus を発火。
+//  左下にジョイスティック領域(joystick-zone)を生成。
+// ============================================================
+export function initMobileControls(callbacks) {
+  // タッチ非対応端末では何もしない
+  if (!('ontouchstart' in window)) return;
+
+  // ---- CSS 注入 ----
+  const mobileStyle = document.createElement('style');
+  mobileStyle.textContent = `
+    /* ジョイスティック領域 */
+    #joystick-zone {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      width: 160px;
+      height: 160px;
+      z-index: 300;
+      /* nipplejs 等のライブラリが後からここにキャンバスを挿入できるよう空にしておく */
+    }
+
+    /* アクションボタン共通 */
+    .mc-btn {
+      position: fixed;
+      z-index: 300;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.55);
+      background: rgba(0,0,0,0.45);
+      color: rgba(255,255,255,0.90);
+      font-family: 'Cinzel', Georgia, serif;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-align: center;
+      line-height: 1.15;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+      transition: background 0.1s, border-color 0.1s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 12px rgba(0,0,0,0.5);
+    }
+    .mc-btn:active {
+      background: rgba(255,255,255,0.18);
+      border-color: rgba(255,255,255,0.9);
+    }
+    .mc-btn-sub  { font-size: 9px; letter-spacing: 1.5px; opacity: 0.6; margin-top: 2px; }
+
+    /* 攻撃ボタン（最大・右端） */
+    #mc-attack {
+      width: 88px;
+      height: 88px;
+      right: 16px;
+      bottom: 90px;
+      font-size: 15px;
+      border-color: rgba(255,200,100,0.65);
+      background: rgba(60,30,0,0.50);
+    }
+    #mc-attack:active { background: rgba(255,160,0,0.30); border-color: rgba(255,200,100,0.95); }
+
+    /* 回避ボタン（中サイズ・攻撃の左） */
+    #mc-roll {
+      width: 72px;
+      height: 72px;
+      right: 116px;
+      bottom: 100px;
+      font-size: 12px;
+    }
+
+    /* 回復ボタン（小サイズ・右下角） */
+    #mc-estus {
+      width: 60px;
+      height: 60px;
+      right: 20px;
+      bottom: 16px;
+      font-size: 11px;
+      border-color: rgba(100,220,160,0.60);
+      background: rgba(0,40,20,0.50);
+    }
+    #mc-estus:active { background: rgba(0,200,100,0.25); border-color: rgba(100,255,180,0.95); }
+  `;
+  document.head.appendChild(mobileStyle);
+
+  // ---- ジョイスティック領域 ----
+  const joystickZone = document.createElement('div');
+  joystickZone.id = 'joystick-zone';
+  document.body.appendChild(joystickZone);
+
+  // ---- ボタン生成ヘルパー ----
+  function createBtn(id, labelMain, labelSub, onTap) {
+    const btn = document.createElement('button');
+    btn.id = id;
+    btn.className = 'mc-btn';
+    btn.innerHTML = `<span>${labelMain}</span><span class="mc-btn-sub">${labelSub}</span>`;
+    // touchstart で即反応 + デフォルト動作(スクロール・ズーム等)を抑制
+    btn.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (onTap) onTap();
+    }, { passive: false });
+    document.body.appendChild(btn);
+    return btn;
+  }
+
+  // ---- 攻撃 ----
+  createBtn('mc-attack', '⚔', 'ATTACK', () => {
+    if (callbacks?.onAttack) callbacks.onAttack();
+  });
+
+  // ---- 回避 ----
+  createBtn('mc-roll', '↻', 'ROLL', () => {
+    if (callbacks?.onRoll) callbacks.onRoll();
+  });
+
+  // ---- 回復（エスト瓶） ----
+  createBtn('mc-estus', '🏺', 'ESTUS', () => {
+    if (callbacks?.onEstus) callbacks.onEstus();
+  });
+
+  // ---- nipplejs ダイナミックジョイスティック ----
+  // dynamic モード: タッチした場所に出現するので操作しやすい
+  import('nipplejs').then(({ default: nipplejs }) => {
+    const joystick = nipplejs.create({
+      zone: joystickZone,
+      mode: 'dynamic',
+      dynamicPage: true,
+      color: 'rgba(255,255,255,0.6)',
+      size: 110,
+      restOpacity: 0.5,
+    });
+
+    // move: data.vector {x, y} を直接格納
+    // nipplejs のdata.vector: x=右(+1)、y=上(+1=前進) — 大きさは常に 1.0
+    // data.force: スティック中心からの押し込み距離 0-1+（移動速度スケーリングに使用）
+    joystick.on('move', (_evt, data) => {
+      mobileInput.joyX  =  data.vector.x;
+      mobileInput.joyY  =  data.vector.y;           // 上 = 前進方向
+      mobileInput.force = Math.min(data.force, 1.0); // 0.45以下で歩き、超えると走り
+      mobileInput.active = true;
+    });
+
+    // end: スティック解放 → 全フィールドをリセット
+    joystick.on('end', () => {
+      mobileInput.joyX  = 0;
+      mobileInput.joyY  = 0;
+      mobileInput.force = 0;
+      mobileInput.active = false;
+    });
+  });
+}
