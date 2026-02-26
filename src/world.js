@@ -1,4 +1,10 @@
 import * as THREE from 'three';
+import { EffectComposer }   from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }       from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass }  from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { BokehPass }        from 'three/addons/postprocessing/BokehPass.js';
+import { OutputPass }       from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment }  from 'three/addons/environments/RoomEnvironment.js';
 
 // ============================================================
 //  シーン・レンダラー
@@ -17,9 +23,41 @@ renderer.toneMappingExposure = 1.2;
 document.body.appendChild(renderer.domElement);
 
 // ============================================================
+//  環境マップ — PBRマテリアル共有用 (PMREMGenerator)
+// ============================================================
+const _pmrem = new THREE.PMREMGenerator(renderer);
+_pmrem.compileEquirectangularShader();
+export const envMap = _pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+_pmrem.dispose();
+
+// ============================================================
 //  カメラ
 // ============================================================
 export const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 80);
+
+// ============================================================
+//  オーディオリスナー — ボス3D音声用
+// ============================================================
+export const audioListener = new THREE.AudioListener();
+camera.add(audioListener);
+
+// ============================================================
+//  ポストプロセッシングチェーン
+//  RenderPass → UnrealBloom → BokehPass(DOF) → OutputPass
+// ============================================================
+export const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.3, 0.4, 0.85
+);
+export const bokehPass = new BokehPass(scene, camera, {
+  focus: 10.0, aperture: 0.00001, maxblur: 0.01,
+});
+const _renderPass = new RenderPass(scene, camera);
+const _outputPass = new OutputPass();
+export const composer = new EffectComposer(renderer);
+composer.addPass(_renderPass);
+composer.addPass(bloomPass);
+composer.addPass(bokehPass);
+composer.addPass(_outputPass);
 
 // ============================================================
 //  ライティング
@@ -76,6 +114,70 @@ export function getCylGeo(r, h, seg) {
   if (!geoCache[key]) geoCache[key] = new THREE.CylinderGeometry(r, r, h, seg);
   return geoCache[key];
 }
+
+// ============================================================
+//  プロシージャル骨テクスチャ
+//  boneTex: 512px キャンバス生成（斑点ノイズ＋繊維ライン）
+//  boneNormal: Sobel エッジ検出による法線マップ
+//  hrBone: { map, normalMap, roughnessMap, aoMap } — PBRマテリアル用テクスチャセット
+// ============================================================
+function _makeBoneTex() {
+  const S = 512;
+  const c = document.createElement('canvas');
+  c.width = c.height = S;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#c8aa84';
+  ctx.fillRect(0, 0, S, S);
+  for (let i = 0; i < 2400; i++) {
+    const x = Math.random() * S, y = Math.random() * S, r = Math.random() * 5 + 1;
+    const v = (Math.random() * 40 - 20) | 0;
+    ctx.fillStyle = `rgb(${(180 + v + 20) | 0},${(160 + v) | 0},${(120 + v - 20) | 0})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  for (let i = 0; i < 35; i++) {
+    ctx.strokeStyle = `rgba(90,70,50,${(Math.random() * 0.15 + 0.04).toFixed(2)})`;
+    ctx.lineWidth = Math.random() * 2 + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(Math.random() * S, 0); ctx.lineTo(Math.random() * S, S);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return { canvas: c, tex };
+}
+function _makeSobelNormal(srcCanvas) {
+  const S = srcCanvas.width;
+  const sd = srcCanvas.getContext('2d').getImageData(0, 0, S, S).data;
+  const nc = document.createElement('canvas');
+  nc.width = nc.height = S;
+  const nctx = nc.getContext('2d');
+  const dst = nctx.createImageData(S, S); const o = dst.data;
+  const g = (x, y) => sd[((y * S + x) * 4)]; // R チャンネルを輝度として使用
+  for (let y = 1; y < S - 1; y++) {
+    for (let x = 1; x < S - 1; x++) {
+      const gx = (-g(x-1,y-1) - 2*g(x-1,y) - g(x-1,y+1) + g(x+1,y-1) + 2*g(x+1,y) + g(x+1,y+1)) / 8;
+      const gy = (-g(x-1,y-1) - 2*g(x,y-1) - g(x+1,y-1) + g(x-1,y+1) + 2*g(x,y+1) + g(x+1,y+1)) / 8;
+      const idx = (y * S + x) * 4;
+      o[idx]   = Math.min(255, Math.max(0, (gx * 0.5 + 0.5) * 255));
+      o[idx+1] = Math.min(255, Math.max(0, (gy * 0.5 + 0.5) * 255));
+      o[idx+2] = 255; o[idx+3] = 255;
+    }
+  }
+  nctx.putImageData(dst, 0, 0);
+  const tex = new THREE.CanvasTexture(nc);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+const _bt = _makeBoneTex();
+export const boneTex    = _bt.tex;
+export const boneNormal = _makeSobelNormal(_bt.canvas);
+// hrBone: PBRマテリアル生成時に spread するテクスチャセット
+export const hrBone = {
+  map:          boneTex,
+  normalMap:    boneNormal,
+  roughnessMap: boneTex, // 骨の明暗を粗さとして流用
+  aoMap:        boneTex, // 暗部をAOとして流用
+};
 
 // ============================================================
 //  地形・障害物データ収集 → InstancedMesh 一括生成
@@ -208,6 +310,48 @@ torchFlames.push(addTorchVisual(-5, 4.3, 5));
 torchFlames.push(addTorchVisual(5, 4.3, 5));
 
 // ============================================================
+//  焚き火（セーブポイント）
+//  bonfireGroup/bonfire2Group: メッシュグループ
+//  bonfireRingMat/bonfire2RingMat: 地面リングエフェクト用マテリアル（main.jsでアニメーション）
+// ============================================================
+function _makeBonfire(x, z) {
+  const g = new THREE.Group();
+  g.position.set(x, 0, z);
+  // 台座（骨素材の円柱）
+  const baseMat = new THREE.MeshStandardMaterial({ color: 0x887766, roughness: 0.9, metalness: 0.1 });
+  const base = new THREE.Mesh(getCylGeo(0.35, 0.25, 8), baseMat);
+  base.position.y = 0.125; base.castShadow = true; g.add(base);
+  // 薪（交差する細いボックス）
+  const logMat = new THREE.MeshStandardMaterial({ color: 0x553322, roughness: 1.0 });
+  const logGeo = getBoxGeo(0.5, 0.08, 0.08);
+  for (let i = 0; i < 3; i++) {
+    const log = new THREE.Mesh(logGeo, logMat);
+    log.position.set(0, 0.28, 0); log.rotation.y = (i / 3) * Math.PI; g.add(log);
+  }
+  // 炎コア
+  const bfFlameMat = new THREE.MeshBasicMaterial({ color: 0xff7700 });
+  const bfFlame = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.45, 6), bfFlameMat);
+  bfFlame.position.y = 0.55; g.add(bfFlame);
+  // ポイントライト
+  const bfLight = new THREE.PointLight(0xff6600, 2.5, 8, 2);
+  bfLight.position.set(0, 0.7, 0); g.add(bfLight);
+  // 地面リングインジケーター
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xff8800, transparent: true, opacity: 0.35 });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.5, 1.0, 24), ringMat);
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; g.add(ring);
+  scene.add(g);
+  return { group: g, ringMat };
+}
+
+const _bf1 = _makeBonfire(0, 8);
+export const bonfireGroup    = _bf1.group;
+export const bonfireRingMat  = _bf1.ringMat;
+
+const _bf2 = _makeBonfire(0, -40);
+export const bonfire2Group   = _bf2.group;
+export const bonfire2RingMat = _bf2.ringMat;
+
+// ============================================================
 //  衝突判定
 // ============================================================
 export function resolveCollision(px, pz, radius) {
@@ -282,6 +426,18 @@ const fL = new THREE.Mesh(frameGeoV, frameMat); fL.position.set(-4.2, 2.25, 0); 
 const fR = new THREE.Mesh(frameGeoV, frameMat); fR.position.set(4.2, 2.25, 0); fR.castShadow = true; fogGateGroup.add(fR);
 const fT = new THREE.Mesh(frameGeoH, frameMat); fT.position.set(0, 4.5, 0); fT.castShadow = true; fogGateGroup.add(fT);
 
+// フォグゲート衝突判定（プレイヤーがゲートをすり抜けられないようにする）
+const _fogGateObs = { type: 'box', x: 0, z: -30, hw: 4.5, hd: 0.4 };
+OBSTACLES.push(_fogGateObs);
+
+export function disableFogGateCollision() {
+  const idx = OBSTACLES.indexOf(_fogGateObs);
+  if (idx !== -1) OBSTACLES.splice(idx, 1);
+}
+export function enableFogGateCollision() {
+  if (!OBSTACLES.includes(_fogGateObs)) OBSTACLES.push(_fogGateObs);
+}
+
 // ============================================================
 //  ユーティリティ
 // ============================================================
@@ -328,6 +484,13 @@ hud.innerHTML = `
   <div class="interact-prompt" id="interactPrompt">霧の中に入る [E]</div>
   <div class="boss-text" id="bossText">BOSS ENCOUNTER</div>
   <div class="fps-counter" id="fpsCounter">FPS: --</div>
+  <div class="saved-text" id="savedText">GAME SAVED</div>
+  <div class="fade-overlay" id="fadeOverlay"></div>
+  <div class="boss-hp-container" id="bossHpContainer">
+    <div class="boss-hp-name">GATE KNIGHT</div>
+    <div class="boss-hp-bg"><div class="boss-hp-fill" id="bossHpBar"></div></div>
+  </div>
+  <div class="victory-text" id="victoryText">VICTORY</div>
 `;
 document.body.appendChild(hud);
 
@@ -412,6 +575,17 @@ style.textContent = `
   .opt-btn:hover{background:#3a3a3a;color:#ccc;border-color:#666}
   .opt-btn.active{background:#554411;color:#ffcc66;border-color:#aa8833;box-shadow:0 0 8px rgba(255,180,50,.2)}
   .opt-hint{text-align:center;color:#555;font:12px monospace;margin-top:20px}
+  .saved-text{position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);color:#aaffcc;font:bold 36px 'Times New Roman',serif;letter-spacing:8px;text-shadow:0 0 20px rgba(100,255,150,.6);opacity:0;transition:opacity 1.5s ease-in}
+  .saved-text.active{opacity:1}
+  .fade-overlay{position:absolute;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity 0.8s ease}
+  .fade-overlay.active{opacity:1}
+  .boss-hp-container{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:480px;opacity:0;transition:opacity .5s}
+  .boss-hp-container.active{opacity:1}
+  .boss-hp-name{color:#ffcc44;font:bold 18px 'Times New Roman',serif;letter-spacing:4px;text-align:center;margin-bottom:6px;text-shadow:0 0 10px rgba(255,200,50,.4)}
+  .boss-hp-bg{width:100%;height:14px;background:#1a0a0a;border:1px solid #552200;border-radius:2px;overflow:hidden;box-shadow:inset 0 0 8px rgba(0,0,0,.9),0 0 12px rgba(200,50,0,.2)}
+  .boss-hp-fill{height:100%;width:100%;background:linear-gradient(180deg,#cc3300,#881100);box-shadow:0 0 8px rgba(255,60,0,.4);transition:width .25s ease-out}
+  .victory-text{position:absolute;top:45%;left:50%;transform:translate(-50%,-50%);color:#ffdd88;font:bold 72px 'Times New Roman',serif;letter-spacing:12px;text-shadow:0 0 40px rgba(255,200,50,.7),0 0 80px rgba(255,150,0,.4);opacity:0;transition:opacity 2s ease-in}
+  .victory-text.active{opacity:1}
 `;
 document.body.appendChild(style);
 
@@ -426,7 +600,12 @@ export const dmgOL = document.getElementById('dmgOL');
 export const youDiedEl = document.getElementById('youDied');
 export const interactPrompt = document.getElementById('interactPrompt');
 export const bossTextEl = document.getElementById('bossText');
-export const fpsCounter = document.getElementById('fpsCounter');
+export const fpsCounter      = document.getElementById('fpsCounter');
+export const savedTextEl     = document.getElementById('savedText');
+export const fadeOverlay     = document.getElementById('fadeOverlay');
+export const bossHpContainer = document.getElementById('bossHpContainer');
+export const bossHpBar       = document.getElementById('bossHpBar');
+export const victoryTextEl   = document.getElementById('victoryText');
 
 // ============================================================
 //  リサイズ
@@ -435,6 +614,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ============================================================
